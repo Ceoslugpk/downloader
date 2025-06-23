@@ -1,7 +1,13 @@
 import os
 import time
-from telegram import Update, Bot
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    CallbackContext,
+)
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
@@ -9,80 +15,74 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 VECTEEZY_EMAIL = os.getenv("VECTEEZY_EMAIL")
 VECTEEZY_PASSWORD = os.getenv("VECTEEZY_PASSWORD")
-DOWNLOAD_DIR = "/path/to/download/dir"  # Update this path on your VPS
+DOWNLOAD_DIR = "/path/to/downloads"
 
-# Initialize Telegram Bot
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
+async def start(update: Update, context: CallbackContext) -> None:
+    await update.message.reply_text("Bot is running. Send me a Vecteezy link to download.")
 
-def start(update: Update, context: CallbackContext) -> None:
-    """Send a welcome message when the bot is started."""
-    update.message.reply_text("Bot is running. Send me a Vecteezy link to download.")
-
-def handle_message(update: Update, context: CallbackContext) -> None:
-    """Handle incoming messages (Vecteezy links)."""
+async def handle_message(update: Update, context: CallbackContext) -> None:
     message = update.message.text
     if "vecteezy.com" in message:
-        update.message.reply_text("Processing your request...")
-        download_file(update, message)
+        await update.message.reply_text("Processing your request...")
+        try:
+            await download_file(update, message)
+        except Exception as e:
+            await update.message.reply_text(f"Failed: {str(e)}")
     else:
-        update.message.reply_text("Please send a valid Vecteezy link.")
+        await update.message.reply_text("Please send a valid Vecteezy link.")
 
-def download_file(update: Update, url: str) -> None:
-    """Download the file from Vecteezy and send it back via Telegram."""
-    # Configure Selenium for headless Chrome
+async def download_file(update: Update, url: str) -> None:
     chrome_options = Options()
-    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
     chrome_options.add_experimental_option("prefs", {
         "download.default_directory": DOWNLOAD_DIR,
         "download.prompt_for_download": False,
     })
 
-    driver = webdriver.Chrome(options=chrome_options)
     try:
-        # Log in to Vecteezy
+        driver = webdriver.Chrome(options=chrome_options)
         driver.get("https://www.vecteezy.com/sign-in")
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.NAME, "email"))).send_keys(VECTEEZY_EMAIL)
+        
+        # Login
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.NAME, "email"))).send_keys(VECTEEZY_EMAIL)
         driver.find_element(By.NAME, "password").send_keys(VECTEEZY_PASSWORD)
         driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
+        time.sleep(3)  # Wait for login
 
-        # Navigate to the provided link and download
+        # Download
         driver.get(url)
-        download_button = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "a.download-button")))
-        download_button.click()
+        download_btn = WebDriverWait(driver, 20).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a.download-button")))
+        download_btn.click()
+        time.sleep(10)  # Wait for download
 
-        # Wait for download to complete (adjust sleep time based on file size)
-        time.sleep(10)
-
-        # Find the latest downloaded file
-        files = [os.path.join(DOWNLOAD_DIR, f) for f in os.listdir(DOWNLOAD_DIR) if os.path.isfile(os.path.join(DOWNLOAD_DIR, f))]
-        if not files:
-            raise Exception("No files were downloaded.")
-        latest_file = max(files, key=os.path.getctime)
-
-        # Send the file back via Telegram
-        with open(latest_file, 'rb') as file:
-            bot.send_document(chat_id=update.message.chat_id, document=file)
+        # Send file
+        files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith(('.zip', '.eps', '.svg'))]
+        if files:
+            latest = max(files, key=lambda f: os.path.getctime(os.path.join(DOWNLOAD_DIR, f)))
+            with open(os.path.join(DOWNLOAD_DIR, latest), 'rb') as f:
+                await update.message.reply_document(f)
+        else:
+            await update.message.reply_text("Downloaded file not found")
 
     except Exception as e:
-        bot.send_message(chat_id=update.message.chat_id, text=f"Error: {str(e)}")
+        await update.message.reply_text(f"Error during download: {str(e)}")
     finally:
-        driver.quit()
+        if 'driver' in locals():
+            driver.quit()
 
-def main() -> None:
-    """Start the Telegram bot."""
-    updater = Updater(TELEGRAM_BOT_TOKEN)
-    dispatcher = updater.dispatcher
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-    updater.start_polling()
-    updater.idle()
+def main():
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
